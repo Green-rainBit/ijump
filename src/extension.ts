@@ -504,7 +504,7 @@ class IJumpExtension {
 			editor.revealRange(new vscode.Range(position, position));
 
 			// 使用VS Code内置命令
-			await vscode.commands.executeCommand('editor.action.goToTypeDefinition');
+			await vscode.commands.executeCommand('editor.action.goToImplementation');
 		} catch (error) {
 			console.error('跳转失败:', error);
 			vscode.window.showErrorMessage('无法跳转到接口方法');
