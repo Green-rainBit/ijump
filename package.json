@@ -2,7 +2,7 @@
   "name": "ijump",
   "displayName": "IJump（Go Jump gojump） - Go项目接口与实现快速跳转 ",
   "description": "Go语言接口与实现智能跳转工具，支持跨文件分析和精确的代码导航",
-  "version": "3.1.4",
+  "version": "4.0.0",
   "publisher": "zhengxiaojun",
   "engines": {
     "vscode": "^1.96.0"
@@ -13,6 +13,9 @@
   ],
   "activationEvents": [
     "onLanguage:go"
+  ],
+  "extensionDependencies": [
+    "golang.Go"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -36,13 +39,12 @@
     "url": "https://github.com/goodends/ijump.git"
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile && npm run build-parser",
+    "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src",
-    "test": "vscode-test",
-    "build-parser": "node ./scripts/build-parser.js"
+    "test": "vscode-test"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
