@@ -33,6 +33,21 @@
           ],
           "default": "auto",
           "description": "选择 Go 代码解析模式"
+        },
+        "ijump.displayMode": {
+          "type": "string",
+          "enum": [
+            "gutter",
+            "codelens",
+            "both"
+          ],
+          "enumDescriptions": [
+            "仅显示行号旁边的图标（悬停显示跳转链接）",
+            "仅显示 CodeLens（点击直接跳转）",
+            "同时显示图标和 CodeLens"
+          ],
+          "default": "both",
+          "description": "选择交互显示模式"
         }
       }
     },

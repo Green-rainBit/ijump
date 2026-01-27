@@ -4,6 +4,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { GoAstParser } from './goAstParser';
 import { ParserManager } from './parserManager';
+import { IJumpCodeLensProvider } from './codeLensProvider';
 import * as fs from 'fs';
 
 // 定义接口用于记录方法信息
@@ -82,11 +83,18 @@ class DecorationGenerator {
 				// 为接口定义添加装饰
 				const interfaceDefLocation = methodLocations.get('__interface_def__');
 				if (interfaceDefLocation && interfaceDefLocation.uri.toString() === currentDocUriString) {
+					const commandUri = vscode.Uri.parse(
+						`command:ijump.jumpToImplementation?${encodeURIComponent(JSON.stringify([currentDocument.uri, interfaceDefLocation.line]))}`
+					);
+					const hoverMessage = new vscode.MarkdownString(`**接口**: ${interfaceName}\n\n[$(symbol-interface) 跳转到实现](${commandUri})`);
+					hoverMessage.isTrusted = true;
+
 					interfaceDecorations.push({
 						range: new vscode.Range(
 							new vscode.Position(interfaceDefLocation.line, 0),
 							new vscode.Position(interfaceDefLocation.line, 0)
-						)
+						),
+						hoverMessage
 					});
 				}
 
@@ -99,11 +107,18 @@ class DecorationGenerator {
 
 					// 只为当前文档中的方法添加装饰
 					if (methodLocation.uri.toString() === currentDocUriString) {
+						const commandUri = vscode.Uri.parse(
+							`command:ijump.jumpToImplementation?${encodeURIComponent(JSON.stringify([currentDocument.uri, methodLocation.line]))}`
+						);
+						const hoverMessage = new vscode.MarkdownString(`**接口方法**: ${methodName}\n\n[$(symbol-interface) 跳转到实现](${commandUri})`);
+						hoverMessage.isTrusted = true;
+
 						interfaceDecorations.push({
 							range: new vscode.Range(
 								new vscode.Position(methodLocation.line, 0),
 								new vscode.Position(methodLocation.line, 0)
-							)
+							),
+							hoverMessage
 						});
 					}
 				}
@@ -196,11 +211,18 @@ class DecorationGenerator {
 				if (interfaceImplementingMethods.has(methodName) &&
 					interfaceImplementingMethods.get(methodName)!.has(structName) &&
 					methodLocation.uri.toString() === currentDocUriString) {
+					const commandUri = vscode.Uri.parse(
+						`command:ijump.jumpToInterface?${encodeURIComponent(JSON.stringify([currentDocument.uri, methodLocation.line]))}`
+					);
+					const hoverMessage = new vscode.MarkdownString(`**实现**: ${methodName}\n\n[$(symbol-class) 跳转到接口定义](${commandUri})`);
+					hoverMessage.isTrusted = true;
+
 					implementationDecorations.push({
 						range: new vscode.Range(
 							new vscode.Position(methodLocation.line, 0),
 							new vscode.Position(methodLocation.line, 0)
-						)
+						),
+						hoverMessage
 					});
 				}
 			}
@@ -254,6 +276,7 @@ class IJumpExtension {
 	private decorationManager: DecorationManager;
 	private decorationGenerator: DecorationGenerator;
 	private cacheManager: CacheManager;
+	private codeLensProvider: IJumpCodeLensProvider;
 	private updateThrottleTimer: NodeJS.Timeout | null = null;
 	private throttleDelay: number = 100; // 减少到100毫秒节流延迟
 	private lastAnalyzedFile: string = ''; // 记录上次解析的文件路径
@@ -264,6 +287,12 @@ class IJumpExtension {
 		this.decorationManager = new DecorationManager(context);
 		this.decorationGenerator = new DecorationGenerator(this.parser);
 		this.cacheManager = new CacheManager();
+		this.codeLensProvider = new IJumpCodeLensProvider(this.parserManager);
+
+		// 注册 CodeLens 提供者
+		context.subscriptions.push(
+			vscode.languages.registerCodeLensProvider('go', this.codeLensProvider)
+		);
 
 		this.registerCommands();
 		this.registerEventListeners();
@@ -411,6 +440,21 @@ class IJumpExtension {
 				return;
 			}
 
+			// 获取行文本找到方法名的位置
+			const lineText = document.lineAt(line).text;
+			const methodNameIndex = lineText.indexOf(methodName);
+
+			if (methodNameIndex < 0) {
+				console.error('在行中未找到方法名');
+				vscode.window.showErrorMessage('在行中未找到方法名');
+				return;
+			}
+
+			// 定位光标到方法名上
+			const position = new vscode.Position(line, methodNameIndex + Math.floor(methodName.length / 2));
+			editor.selection = new vscode.Selection(position, position);
+			editor.revealRange(new vscode.Range(position, position));
+
 			// 使用VS Code内置命令
 			await vscode.commands.executeCommand('editor.action.goToTypeDefinition');
 		} catch (error) {
@@ -484,191 +528,77 @@ class IJumpExtension {
 		const document = editor.document;
 		const docKey = document.uri.toString();
 
-		// 准备数据结构
-		const methodMap = new Map<number, string>();
-		const lineTypes = new Map<number, 'interface' | 'implementation'>();
-		const docDecoratedLines = new Set<number>();
-
 		try {
-			// 使用AST解析器获取信息
-			const parseResult = await this.parser.parseGoFile(document.uri.fsPath);
+			// 获取装饰信息
+			const {
+				interfaceDecorations: interfaceInfos,
+				implementationDecorations: implementationInfos,
+				lineToMethodMap,
+				lineTypeMap
+			} = await this.parserManager.getAllDecorations(document);
 
-			// 检查是否返回了有效的包信息
-			if (!parseResult || !parseResult.packages || Object.keys(parseResult.packages).length === 0) {
-				console.log('未找到有效的Go包信息，跳过装饰更新');
+			// 更新缓存
+			const docDecoratedLines = new Set<number>();
+			for (const line of lineToMethodMap.keys()) {
+				docDecoratedLines.add(line);
+			}
+
+			this.cacheManager.updateMethodMap(docKey, lineToMethodMap);
+			this.cacheManager.updateLineTypeMap(docKey, lineTypeMap);
+			this.cacheManager.updateDecoratedLines(docKey, docDecoratedLines);
+
+			// 触发 CodeLens 更新
+			if (this.codeLensProvider) {
+				this.codeLensProvider.refresh();
+			}
+
+			// 检查是否需要显示 Gutter Icons
+			const config = vscode.workspace.getConfiguration('ijump');
+			const displayMode = config.get<string>('displayMode', 'both');
+
+			if (displayMode === 'codelens') {
+				// 如果仅显示 CodeLens，清空 Gutter Icons
+				this.decorationManager.applyDecorations(editor, [], []);
 				return;
 			}
 
-			// 获取接口和实现信息
-			const interfaceNames = this.parser.getAllInterfaceNames(parseResult);
-			const interfaceMethodsMap = this.parser.getInterfaceMethods(parseResult);
-			const interfaceLocationsMap = this.parser.getInterfaceLocations(parseResult);
-			const structMethodsMap = this.parser.getImplementations(parseResult);
-			const structsMap = this.parser.getStructsInfo(parseResult, interfaceNames);
+			// 生成 Gutter Icons 装饰 options
+			const interfaceDecorations: vscode.DecorationOptions[] = [];
+			const implementationDecorations: vscode.DecorationOptions[] = [];
 
-			// 检查哪些接口被实现了
-			const implementedInterfaces = this.parser.checkInterfaceImplementations(
-				interfaceMethodsMap,
-				structMethodsMap,
-				structsMap
-			);
+			// 处理接口装饰
+			for (const info of interfaceInfos) {
+				const commandUri = vscode.Uri.parse(
+					`command:ijump.jumpToImplementation?${encodeURIComponent(JSON.stringify([document.uri, info.line]))}`
+				);
+				const hoverMessage = new vscode.MarkdownString(`**接口**: ${info.name}\n\n[$(symbol-interface) 跳转到实现](${commandUri})`);
+				hoverMessage.isTrusted = true;
 
-			// 生成装饰
-			const interfaceDecorations = await this.decorationGenerator.generateInterfaceDecorations(
-				document,
-				implementedInterfaces,
-				interfaceLocationsMap
-			);
-
-			const [implementationDecorations, interfaceReferenceDecorations] = await this.decorationGenerator.generateImplementationDecorations(
-				document,
-				implementedInterfaces,
-				interfaceMethodsMap,
-				structMethodsMap,
-				structsMap
-			);
-
-			// 创建实现接口的方法和结构体映射
-			const interfaceImplementingMethods = new Map<string, Set<string>>();
-			const structImplementedInterfaces = new Map<string, Set<string>>();
-
-			// 填充方法映射和行类型信息
-			// 接口和接口方法
-			for (const [interfaceName, methodLocations] of interfaceLocationsMap.entries()) {
-				if (implementedInterfaces.has(interfaceName)) {
-					// 接口定义
-					const interfaceDefLocation = methodLocations.get('__interface_def__');
-					if (interfaceDefLocation && interfaceDefLocation.uri.toString() === docKey) {
-						methodMap.set(interfaceDefLocation.line, interfaceName);
-						lineTypes.set(interfaceDefLocation.line, 'interface');
-						docDecoratedLines.add(interfaceDefLocation.line);
-					}
-
-					// 接口方法
-					for (const [methodName, methodLocation] of methodLocations.entries()) {
-						if (methodName !== '__interface_def__' && methodLocation.uri.toString() === docKey) {
-							methodMap.set(methodLocation.line, methodName);
-							lineTypes.set(methodLocation.line, 'interface');
-							docDecoratedLines.add(methodLocation.line);
-						}
-					}
-
-					// 为接口方法创建实现映射
-					const methods = interfaceMethodsMap.get(interfaceName) || [];
-					for (const method of methods) {
-						if (!interfaceImplementingMethods.has(method)) {
-							interfaceImplementingMethods.set(method, new Set<string>());
-						}
-					}
-				}
+				interfaceDecorations.push({
+					range: new vscode.Range(info.line, 0, info.line, 0),
+					hoverMessage
+				});
 			}
 
-			// 查找实现接口的结构体
-			for (const [interfaceName, methods] of interfaceMethodsMap.entries()) {
-				if (implementedInterfaces.has(interfaceName)) {
-					// 检查每个结构体是否完全实现了接口
-					for (const [structName, structMethods] of structMethodsMap.entries()) {
-						// 收集结构体方法名
-						const structMethodNames = new Set<string>();
-						for (const methodName of structMethods.keys()) {
-							if (!methodName.startsWith('__')) {
-								structMethodNames.add(methodName);
-							}
-						}
+			// 处理实现装饰
+			for (const info of implementationInfos) {
+				const commandUri = vscode.Uri.parse(
+					`command:ijump.jumpToInterface?${encodeURIComponent(JSON.stringify([document.uri, info.line]))}`
+				);
+				const hoverMessage = new vscode.MarkdownString(`**实现**: ${info.name}\n\n[$(symbol-class) 跳转到接口定义](${commandUri})`);
+				hoverMessage.isTrusted = true;
 
-						// 检查是否实现了接口的所有方法
-						let implementedAllMethods = true;
-						for (const method of methods) {
-							if (!structMethodNames.has(method)) {
-								implementedAllMethods = false;
-								break;
-							}
-						}
-
-						// 如果结构体完全实现了接口
-						if (implementedAllMethods) {
-							// 记录结构体实现的接口
-							if (!structImplementedInterfaces.has(structName)) {
-								structImplementedInterfaces.set(structName, new Set<string>());
-							}
-							structImplementedInterfaces.get(structName)!.add(interfaceName);
-
-							// 记录实现接口方法的结构体
-							for (const method of methods) {
-								interfaceImplementingMethods.get(method)?.add(structName);
-							}
-						}
-					}
-				}
+				implementationDecorations.push({
+					range: new vscode.Range(info.line, 0, info.line, 0),
+					hoverMessage
+				});
 			}
-
-			// 只为实现接口方法的结构体添加实现装饰
-			for (const [structName, methodsMap] of structMethodsMap.entries()) {
-				// 如果结构体没有实现任何接口，跳过
-				if (!structImplementedInterfaces.has(structName)) {
-					continue;
-				}
-
-				for (const [methodName, methodLocation] of methodsMap.entries()) {
-					// 跳过特殊标记
-					if (methodName.startsWith('__')) {
-						continue;
-					}
-
-					// 只有当方法是接口方法的实现时才添加装饰
-					if (interfaceImplementingMethods.has(methodName) &&
-						interfaceImplementingMethods.get(methodName)?.has(structName) &&
-						methodLocation.uri.toString() === docKey) {
-						methodMap.set(methodLocation.line, methodName);
-						lineTypes.set(methodLocation.line, 'implementation');
-						docDecoratedLines.add(methodLocation.line);
-					}
-				}
-
-				// 为实现接口的结构体添加装饰
-				const structDef = structMethodsMap.get(structName)?.get('__struct_def__');
-				if (structDef && structDef.uri.toString() === docKey) {
-					methodMap.set(structDef.line, structName);
-					lineTypes.set(structDef.line, 'implementation');
-					docDecoratedLines.add(structDef.line);
-				}
-			}
-
-			// 为嵌入字段添加装饰
-			for (const [structName, structInfo] of structsMap.entries()) {
-				// 只处理嵌入字段
-				const fields = structInfo.get('fields');
-				if (fields) {
-					for (const [fieldName, fieldInfo] of fields.entries()) {
-						if (fieldInfo.embedded && fieldInfo.uri.toString() === docKey) {
-							// 检查嵌入字段是否是接口或实现了接口的结构体
-							const fieldType = fieldInfo.type;
-							const isInterface = interfaceMethodsMap.has(fieldType);
-							const isImplementedInterface = implementedInterfaces.has(fieldType);
-							const isImplementingStruct = structImplementedInterfaces.has(fieldType);
-
-							// 只有嵌入了接口或实现接口的结构体才添加装饰
-							if (isInterface || isImplementedInterface || isImplementingStruct) {
-								methodMap.set(fieldInfo.line, fieldType);
-								lineTypes.set(fieldInfo.line, 'interface');
-								docDecoratedLines.add(fieldInfo.line);
-							}
-						}
-					}
-				}
-			}
-
-			// 更新缓存
-			this.cacheManager.updateMethodMap(docKey, methodMap);
-			this.cacheManager.updateLineTypeMap(docKey, lineTypes);
-			this.cacheManager.updateDecoratedLines(docKey, docDecoratedLines);
 
 			// 应用装饰
-			this.decorationManager.applyDecorations(editor,
-				[...interfaceDecorations, ...interfaceReferenceDecorations],
-				implementationDecorations);
+			this.decorationManager.applyDecorations(editor, interfaceDecorations, implementationDecorations);
+
 		} catch (error) {
-			console.error('更新装饰失败:', error);
+			console.error('[IJump] 更新装饰失败:', error);
 		}
 	}
 
