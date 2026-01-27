@@ -3,6 +3,7 @@
 src/**
 !src/parser/
 !src/parser/parser
+!src/parser/parser.exe
 !src/parser/goparser.go
 .gitignore
 .yarnrc

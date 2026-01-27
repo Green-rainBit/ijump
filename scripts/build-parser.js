@@ -11,8 +11,11 @@ const path = require('path');
 const rootDir = path.resolve(__dirname, '..');
 const parserDir = path.join(rootDir, 'src', 'parser');
 const goSourceFile = path.join(parserDir, 'goparser.go');
-const parserBin = path.join(parserDir, 'parser');
+// 根据平台添加.exe扩展名
+const parserBinName = process.platform === 'win32' ? 'parser.exe' : 'parser';
+const parserBin = path.join(parserDir, parserBinName);
 const outDir = path.join(rootDir, 'out', 'parser');
+
 
 console.log('[build-parser] 开始预编译Go解析器...');
 
@@ -39,28 +42,28 @@ try {
         cwd: parserDir,
         stdio: 'inherit'
     });
-    
+
     // 确保文件已创建
     if (fs.existsSync(parserBin)) {
         console.log(`[build-parser] 成功编译解析器: ${parserBin}`);
-        
+
         // 确保文件有执行权限
         if (process.platform !== 'win32') {
             execSync(`chmod +x "${parserBin}"`);
             console.log('[build-parser] 已添加执行权限');
         }
-        
+
         // 确保输出目录存在
         if (!fs.existsSync(outDir)) {
             fs.mkdirSync(outDir, { recursive: true });
             console.log(`[build-parser] 创建输出目录: ${outDir}`);
         }
-        
+
         // 复制解析器到输出目录
         const outParserBin = path.join(outDir, path.basename(parserBin));
         fs.copyFileSync(parserBin, outParserBin);
         console.log(`[build-parser] 已复制解析器到输出目录: ${outParserBin}`);
-        
+
         // 确保复制的文件有执行权限
         if (process.platform !== 'win32') {
             execSync(`chmod +x "${outParserBin}"`);
