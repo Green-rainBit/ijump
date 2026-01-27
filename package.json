@@ -42,12 +42,25 @@
             "both"
           ],
           "enumDescriptions": [
-            "仅显示行号旁边的图标（悬停显示跳转链接）",
+            "仅显示图标（位置由 iconPosition 决定，悬停显示跳转链接）",
             "仅显示 CodeLens（点击直接跳转）",
             "同时显示图标和 CodeLens"
           ],
           "default": "both",
           "description": "选择交互显示模式"
+        },
+        "ijump.iconPosition": {
+          "type": "string",
+          "enum": [
+            "gutter",
+            "inline"
+          ],
+          "enumDescriptions": [
+            "图标显示在行号左侧（Gutter）",
+            "图标显示在方法名后面（Inline）"
+          ],
+          "default": "gutter",
+          "description": "图标显示位置"
         }
       }
     },

@@ -22,36 +22,79 @@ interface GoFileInfo {
 }
 
 // 定义装饰类
+// 定义装饰类
 class DecorationManager {
-	private interfaceDecorationType: vscode.TextEditorDecorationType;
-	private implementationDecorationType: vscode.TextEditorDecorationType;
+	private interfaceDecorationType: vscode.TextEditorDecorationType | undefined;
+	private implementationDecorationType: vscode.TextEditorDecorationType | undefined;
+	private interfaceIconPath: string;
+	private implementationIconPath: string;
 
 	constructor(context: vscode.ExtensionContext) {
-		const interfaceIconPath = path.join(context.extensionPath, 'resources', 'interface.svg');
-		const implementationIconPath = path.join(context.extensionPath, 'resources', 'implementation.svg');
+		this.interfaceIconPath = path.join(context.extensionPath, 'resources', 'interface.svg');
+		this.implementationIconPath = path.join(context.extensionPath, 'resources', 'implementation.svg');
+		this.configure();
+	}
 
-		// 接口方法装饰（跳转到实现）
-		this.interfaceDecorationType = vscode.window.createTextEditorDecorationType({
-			gutterIconPath: interfaceIconPath,
-			gutterIconSize: '60%',
-			isWholeLine: false
-		});
+	// 配置装饰类型
+	public configure() {
+		// 清理旧的装饰类型
+		if (this.interfaceDecorationType) {
+			this.interfaceDecorationType.dispose();
+		}
+		if (this.implementationDecorationType) {
+			this.implementationDecorationType.dispose();
+		}
 
-		// 实现方法装饰（跳转到接口）
-		this.implementationDecorationType = vscode.window.createTextEditorDecorationType({
-			gutterIconPath: implementationIconPath,
-			gutterIconSize: '60%',
-			isWholeLine: false
-		});
+		const config = vscode.workspace.getConfiguration('ijump');
+		const iconPosition = config.get<string>('iconPosition', 'gutter');
+
+		if (iconPosition === 'inline') {
+			// Inline 模式：使用 after 属性显示图标
+			const interfaceIconUri = vscode.Uri.file(this.interfaceIconPath);
+			const implementationIconUri = vscode.Uri.file(this.implementationIconPath);
+
+			this.interfaceDecorationType = vscode.window.createTextEditorDecorationType({
+				after: {
+					contentIconPath: interfaceIconUri,
+					margin: '0 0 0 5px',
+					width: '14px',
+					height: '14px'
+				},
+				isWholeLine: false
+			});
+
+			this.implementationDecorationType = vscode.window.createTextEditorDecorationType({
+				after: {
+					contentIconPath: implementationIconUri,
+					margin: '0 0 0 5px',
+					width: '14px',
+					height: '14px'
+				},
+				isWholeLine: false
+			});
+		} else {
+			// Gutter 模式：使用 gutterIconPath
+			this.interfaceDecorationType = vscode.window.createTextEditorDecorationType({
+				gutterIconPath: this.interfaceIconPath,
+				gutterIconSize: '60%',
+				isWholeLine: false
+			});
+
+			this.implementationDecorationType = vscode.window.createTextEditorDecorationType({
+				gutterIconPath: this.implementationIconPath,
+				gutterIconSize: '60%',
+				isWholeLine: false
+			});
+		}
 	}
 
 	// 获取接口装饰类型
-	getInterfaceDecorationType(): vscode.TextEditorDecorationType {
+	getInterfaceDecorationType(): vscode.TextEditorDecorationType | undefined {
 		return this.interfaceDecorationType;
 	}
 
 	// 获取实现装饰类型
-	getImplementationDecorationType(): vscode.TextEditorDecorationType {
+	getImplementationDecorationType(): vscode.TextEditorDecorationType | undefined {
 		return this.implementationDecorationType;
 	}
 
@@ -59,11 +102,16 @@ class DecorationManager {
 	applyDecorations(editor: vscode.TextEditor,
 		interfaceDecorations: vscode.DecorationOptions[],
 		implementationDecorations: vscode.DecorationOptions[]) {
-		editor.setDecorations(this.interfaceDecorationType, interfaceDecorations);
-		editor.setDecorations(this.implementationDecorationType, implementationDecorations);
+		if (this.interfaceDecorationType) {
+			editor.setDecorations(this.interfaceDecorationType, interfaceDecorations);
+		}
+		if (this.implementationDecorationType) {
+			editor.setDecorations(this.implementationDecorationType, implementationDecorations);
+		}
 		console.log(`应用了 ${interfaceDecorations.length} 个接口装饰和 ${implementationDecorations.length} 个实现装饰`);
 	}
 }
+
 
 // 装饰生成类
 class DecorationGenerator {
@@ -574,8 +622,21 @@ class IJumpExtension {
 				const hoverMessage = new vscode.MarkdownString(`**接口**: ${info.name}\n\n[$(symbol-interface) 跳转到实现](${commandUri})`);
 				hoverMessage.isTrusted = true;
 
+				// 计算范围 - 尝试定位到方法名末尾以支持 Inline 模式
+				let range = new vscode.Range(info.line, 0, info.line, 0);
+				try {
+					const lineText = document.lineAt(info.line).text;
+					const nameIndex = lineText.indexOf(info.name);
+					if (nameIndex >= 0) {
+						const endPos = nameIndex + info.name.length;
+						range = new vscode.Range(info.line, endPos, info.line, endPos);
+					}
+				} catch (e) {
+					// 忽略可能的行号错误
+				}
+
 				interfaceDecorations.push({
-					range: new vscode.Range(info.line, 0, info.line, 0),
+					range,
 					hoverMessage
 				});
 			}
@@ -588,8 +649,21 @@ class IJumpExtension {
 				const hoverMessage = new vscode.MarkdownString(`**实现**: ${info.name}\n\n[$(symbol-class) 跳转到接口定义](${commandUri})`);
 				hoverMessage.isTrusted = true;
 
+				// 计算范围 - 尝试定位到方法名末尾以支持 Inline 模式
+				let range = new vscode.Range(info.line, 0, info.line, 0);
+				try {
+					const lineText = document.lineAt(info.line).text;
+					const nameIndex = lineText.indexOf(info.name);
+					if (nameIndex >= 0) {
+						const endPos = nameIndex + info.name.length;
+						range = new vscode.Range(info.line, endPos, info.line, endPos);
+					}
+				} catch (e) {
+					// 忽略
+				}
+
 				implementationDecorations.push({
-					range: new vscode.Range(info.line, 0, info.line, 0),
+					range,
 					hoverMessage
 				});
 			}
@@ -685,6 +759,21 @@ class IJumpExtension {
 		this.context.subscriptions.push(
 			vscode.languages.registerHoverProvider('go', {
 				provideHover: (document, position, token) => this.provideHover(document, position, token)
+			})
+		);
+
+		// 监听配置变化
+		this.context.subscriptions.push(
+			vscode.workspace.onDidChangeConfiguration(e => {
+				if (e.affectsConfiguration('ijump')) {
+					this.decorationManager.configure();
+					// 如果有活动编辑器，刷新装饰
+					if (vscode.window.activeTextEditor && vscode.window.activeTextEditor.document.languageId === 'go') {
+						this.throttleUpdateDecorations(vscode.window.activeTextEditor);
+					}
+					// 刷新 CodeLens
+					this.codeLensProvider.refresh();
+				}
 			})
 		);
 	}
