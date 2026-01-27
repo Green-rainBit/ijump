@@ -3,8 +3,10 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as cp from 'child_process';
 import { promisify } from 'util';
+import { IParserService, DecorationInfo } from './parserInterface';
 
 const execFile = promisify(cp.execFile);
+
 
 // Go AST解析器结果接口
 export interface GoAstResult {
@@ -62,7 +64,7 @@ export interface ImplementationInfo {
     isPointer: boolean;
 }
 
-export class GoAstParser {
+export class GoAstParser implements IParserService {
     private parserPath: string;
     private parserBinPath: string = ''; // 存储实际找到的解析器二进制文件路径
     private parseCache = new Map<string, GoAstResult>();
@@ -722,5 +724,194 @@ export class GoAstParser {
         }
 
         return implementedInterfaces;
+    }
+
+    // ==================== IParserService 接口实现 ====================
+
+    /**
+     * 获取服务名称
+     */
+    getServiceName(): string {
+        return 'parser';
+    }
+
+    /**
+     * 检查解析器是否可用
+     */
+    async isAvailable(): Promise<boolean> {
+        return await this.ensureParserReady();
+    }
+
+    /**
+     * 获取接口装饰信息
+     */
+    async getInterfaceDecorations(document: vscode.TextDocument): Promise<DecorationInfo[]> {
+        const allDecorations = await this.getAllDecorations(document);
+        return allDecorations.interfaceDecorations;
+    }
+
+    /**
+     * 获取实现装饰信息
+     */
+    async getImplementationDecorations(document: vscode.TextDocument): Promise<DecorationInfo[]> {
+        const allDecorations = await this.getAllDecorations(document);
+        return allDecorations.implementationDecorations;
+    }
+
+    /**
+     * 获取所有装饰信息
+     */
+    async getAllDecorations(document: vscode.TextDocument): Promise<{
+        interfaceDecorations: DecorationInfo[];
+        implementationDecorations: DecorationInfo[];
+        lineToMethodMap: Map<number, string>;
+        lineTypeMap: Map<number, 'interface' | 'implementation'>;
+    }> {
+        const interfaceDecorations: DecorationInfo[] = [];
+        const implementationDecorations: DecorationInfo[] = [];
+        const lineToMethodMap = new Map<number, string>();
+        const lineTypeMap = new Map<number, 'interface' | 'implementation'>();
+
+        try {
+            // 使用现有的解析逻辑
+            const parseResult = await this.parseGoFile(document.uri.fsPath);
+
+            if (!parseResult || !parseResult.packages || Object.keys(parseResult.packages).length === 0) {
+                return { interfaceDecorations, implementationDecorations, lineToMethodMap, lineTypeMap };
+            }
+
+            const docKey = document.uri.toString();
+
+            // 获取接口和实现信息
+            const interfaceNames = this.getAllInterfaceNames(parseResult);
+            const interfaceMethodsMap = this.getInterfaceMethods(parseResult);
+            const interfaceLocationsMap = this.getInterfaceLocations(parseResult);
+            const structMethodsMap = this.getImplementations(parseResult);
+            const structsMap = this.getStructsInfo(parseResult, interfaceNames);
+
+            // 检查哪些接口被实现了
+            const implementedInterfaces = this.checkInterfaceImplementations(
+                interfaceMethodsMap,
+                structMethodsMap,
+                structsMap
+            );
+
+            // 创建实现接口的方法和结构体映射
+            const interfaceImplementingMethods = new Map<string, Set<string>>();
+            const structImplementedInterfaces = new Map<string, Set<string>>();
+
+            // 处理接口装饰
+            for (const [interfaceName, methodLocations] of interfaceLocationsMap.entries()) {
+                if (implementedInterfaces.has(interfaceName)) {
+                    // 接口定义
+                    const interfaceDefLocation = methodLocations.get('__interface_def__');
+                    if (interfaceDefLocation && interfaceDefLocation.uri.toString() === docKey) {
+                        interfaceDecorations.push({
+                            line: interfaceDefLocation.line,
+                            type: 'interface',
+                            name: interfaceName
+                        });
+                        lineToMethodMap.set(interfaceDefLocation.line, interfaceName);
+                        lineTypeMap.set(interfaceDefLocation.line, 'interface');
+                    }
+
+                    // 接口方法
+                    for (const [methodName, methodLocation] of methodLocations.entries()) {
+                        if (methodName !== '__interface_def__' && methodLocation.uri.toString() === docKey) {
+                            interfaceDecorations.push({
+                                line: methodLocation.line,
+                                type: 'interface',
+                                name: methodName
+                            });
+                            lineToMethodMap.set(methodLocation.line, methodName);
+                            lineTypeMap.set(methodLocation.line, 'interface');
+                        }
+                    }
+
+                    // 为接口方法创建实现映射
+                    const methods = interfaceMethodsMap.get(interfaceName) || [];
+                    for (const method of methods) {
+                        if (!interfaceImplementingMethods.has(method)) {
+                            interfaceImplementingMethods.set(method, new Set<string>());
+                        }
+                    }
+                }
+            }
+
+            // 查找实现接口的结构体
+            for (const [interfaceName, methods] of interfaceMethodsMap.entries()) {
+                if (implementedInterfaces.has(interfaceName)) {
+                    for (const [structName, structMethods] of structMethodsMap.entries()) {
+                        const structMethodNames = new Set<string>();
+                        for (const methodName of structMethods.keys()) {
+                            if (!methodName.startsWith('__')) {
+                                structMethodNames.add(methodName);
+                            }
+                        }
+
+                        let implementedAllMethods = true;
+                        for (const method of methods) {
+                            if (!structMethodNames.has(method)) {
+                                implementedAllMethods = false;
+                                break;
+                            }
+                        }
+
+                        if (implementedAllMethods) {
+                            if (!structImplementedInterfaces.has(structName)) {
+                                structImplementedInterfaces.set(structName, new Set<string>());
+                            }
+                            structImplementedInterfaces.get(structName)!.add(interfaceName);
+
+                            for (const method of methods) {
+                                interfaceImplementingMethods.get(method)?.add(structName);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 处理实现装饰
+            for (const [structName, methodsMap] of structMethodsMap.entries()) {
+                if (!structImplementedInterfaces.has(structName)) {
+                    continue;
+                }
+
+                for (const [methodName, methodLocation] of methodsMap.entries()) {
+                    if (methodName.startsWith('__')) {
+                        continue;
+                    }
+
+                    if (interfaceImplementingMethods.has(methodName) &&
+                        interfaceImplementingMethods.get(methodName)?.has(structName) &&
+                        methodLocation.uri.toString() === docKey) {
+                        implementationDecorations.push({
+                            line: methodLocation.line,
+                            type: 'implementation',
+                            name: methodName
+                        });
+                        lineToMethodMap.set(methodLocation.line, methodName);
+                        lineTypeMap.set(methodLocation.line, 'implementation');
+                    }
+                }
+
+                // 为实现接口的结构体添加装饰
+                const structDef = structMethodsMap.get(structName)?.get('__struct_def__');
+                if (structDef && structDef.uri.toString() === docKey) {
+                    implementationDecorations.push({
+                        line: structDef.line,
+                        type: 'implementation',
+                        name: structName
+                    });
+                    lineToMethodMap.set(structDef.line, structName);
+                    lineTypeMap.set(structDef.line, 'implementation');
+                }
+            }
+
+            return { interfaceDecorations, implementationDecorations, lineToMethodMap, lineTypeMap };
+        } catch (error) {
+            console.error('[IJump] GoAstParser 获取装饰信息失败:', error);
+            return { interfaceDecorations, implementationDecorations, lineToMethodMap, lineTypeMap };
+        }
     }
 } 

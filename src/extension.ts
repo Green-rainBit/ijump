@@ -3,6 +3,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { GoAstParser } from './goAstParser';
+import { ParserManager } from './parserManager';
 import * as fs from 'fs';
 
 // 定义接口用于记录方法信息
@@ -249,6 +250,7 @@ class CacheManager {
 // 主扩展管理类
 class IJumpExtension {
 	private parser: GoAstParser;
+	private parserManager: ParserManager;
 	private decorationManager: DecorationManager;
 	private decorationGenerator: DecorationGenerator;
 	private cacheManager: CacheManager;
@@ -257,7 +259,8 @@ class IJumpExtension {
 	private lastAnalyzedFile: string = ''; // 记录上次解析的文件路径
 
 	constructor(private context: vscode.ExtensionContext) {
-		this.parser = new GoAstParser(context.extensionPath);
+		this.parserManager = new ParserManager(context);
+		this.parser = this.parserManager.getGoAstParser();
 		this.decorationManager = new DecorationManager(context);
 		this.decorationGenerator = new DecorationGenerator(this.parser);
 		this.cacheManager = new CacheManager();
@@ -335,6 +338,11 @@ class IJumpExtension {
 	}
 
 	initialize() {
+		// 初始化解析器管理器
+		this.parserManager.initialize().then(() => {
+			console.log(`[IJump] 解析器模式: ${this.parserManager.getServiceName()}`);
+		});
+
 		// 检查解析器
 		this.checkParser().then(exists => {
 			if (exists) {
@@ -683,12 +691,32 @@ class IJumpExtension {
 		// 添加清除缓存命令
 		this.context.subscriptions.push(
 			vscode.commands.registerCommand('ijump.clearCache', () => {
-				this.parser.clearCache();
+				this.parserManager.clearCache();
 				vscode.window.showInformationMessage('IJump: 已清除所有缓存');
 
 				// 如果当前有活动编辑器，更新装饰
 				if (vscode.window.activeTextEditor) {
 					this.throttleUpdateDecorations(vscode.window.activeTextEditor);
+				}
+			})
+		);
+
+		// 切换解析模式命令
+		this.context.subscriptions.push(
+			vscode.commands.registerCommand('ijump.switchMode', async () => {
+				const modes = [
+					{ label: 'auto', description: '自动选择（优先 parser，不可用时回退到 gopls）' },
+					{ label: 'parser', description: '使用自定义 Go 解析器' },
+					{ label: 'gopls', description: '使用 gopls 语言服务器（需要 Go 扩展）' }
+				];
+
+				const currentMode = this.parserManager.getCurrentMode();
+				const selected = await vscode.window.showQuickPick(modes, {
+					placeHolder: `选择解析模式（当前: ${currentMode}）`
+				});
+
+				if (selected) {
+					await this.parserManager.switchMode(selected.label as 'auto' | 'parser' | 'gopls');
 				}
 			})
 		);

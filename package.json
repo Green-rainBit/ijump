@@ -16,6 +16,26 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "configuration": {
+      "title": "IJump",
+      "properties": {
+        "ijump.parserMode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "parser",
+            "gopls"
+          ],
+          "enumDescriptions": [
+            "自动选择（优先 parser，不可用时回退到 gopls）",
+            "使用自定义 Go 解析器",
+            "使用 gopls 语言服务器（需要 Go 扩展）"
+          ],
+          "default": "auto",
+          "description": "选择 Go 代码解析模式"
+        }
+      }
+    },
     "commands": [
       {
         "command": "ijump.jumpToImplementation",
@@ -28,6 +48,10 @@
       {
         "command": "ijump.clearCache",
         "title": "IJump: 清除缓存"
+      },
+      {
+        "command": "ijump.switchMode",
+        "title": "IJump: 切换解析模式"
       }
     ]
   },
