@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { IParserService, DecorationInfo, InterfaceInfo, StructInfo, MethodInfo } from './parserInterface';
+import { IParserService, DecorationInfo, InterfaceInfo, StructInfo, MethodInfo, CommentImplementation, JumpTarget } from './parserInterface';
 
 /**
  * GoplsService - 使用 VS Code 内置 LSP API 与 gopls 交互
@@ -217,6 +217,51 @@ export class GoplsService implements IParserService {
     }
 
     /**
+     * 从文档文本中解析 "ensure X implements Y" 格式的注释声明
+     * 返回一个 Map，key 是结构体名，value 是实现的接口列表
+     */
+    private parseImplementsComments(document: vscode.TextDocument): Map<string, string[]> {
+        const implementsMap = new Map<string, string[]>();
+        const text = document.getText();
+
+        // 匹配注释中的 ensure X implements Y 格式
+        // 支持多种格式:
+        // - // ensure StructName implements InterfaceName
+        // - // ensure StructName implements Interface1, Interface2
+        // - /* ensure StructName implements InterfaceName */
+        // - // StructName implements InterfaceName
+        const patterns = [
+            // 完整格式: ensure X implements Y
+            /\/\/\s*ensure\s+(\w+)\s+implements\s+([\w,\s]+)/gi,
+            /\/\*\s*ensure\s+(\w+)\s+implements\s+([\w,\s]+)\s*\*\//gi,
+            // 简化格式: X implements Y (在注释中)
+            /\/\/\s*(\w+)\s+implements\s+([\w,\s]+)/gi,
+        ];
+
+        for (const pattern of patterns) {
+            let match;
+            while ((match = pattern.exec(text)) !== null) {
+                const structName = match[1].trim();
+                const interfacesPart = match[2];
+
+                // 解析接口列表
+                const interfaces = interfacesPart
+                    .split(',')
+                    .map(s => s.trim())
+                    .filter(s => s.length > 0 && /^[A-Za-z_]\w*$/.test(s));
+
+                if (interfaces.length > 0) {
+                    const existing = implementsMap.get(structName) || [];
+                    implementsMap.set(structName, [...existing, ...interfaces]);
+                    console.log(`[IJump] gopls: 发现注释声明: ${structName} implements ${interfaces.join(', ')}`);
+                }
+            }
+        }
+
+        return implementsMap;
+    }
+
+    /**
      * 获取接口装饰信息
      */
     async getInterfaceDecorations(document: vscode.TextDocument): Promise<DecorationInfo[]> {
@@ -301,10 +346,25 @@ export class GoplsService implements IParserService {
                 allMethods.push(...struct.methods);
             }
 
+            // 解析注释中的接口实现声明
+            const commentImplements = this.parseImplementsComments(document);
+
+            // 创建接口名到方法名的映射
+            const interfaceMethodNames = new Map<string, Set<string>>();
+            for (const iface of interfaces) {
+                const methodNames = new Set<string>();
+                for (const method of iface.methods) {
+                    methodNames.add(method.name);
+                }
+                interfaceMethodNames.set(iface.name, methodNames);
+            }
+
             for (const method of allMethods) {
                 const position = new vscode.Position(method.line, 0);
                 const typeDefinitions = await this.findTypeDefinition(document.uri, position);
 
+                // 仅当 gopls 能检测到类型定义时，才添加实现装饰
+                // 对于仅注释声明的接口实现，不在方法上显示装饰
                 if (typeDefinitions && typeDefinitions.length > 0) {
                     // 方法实现了接口
                     implementationDecorations.push({
@@ -314,6 +374,62 @@ export class GoplsService implements IParserService {
                     });
                     lineToMethodMap.set(method.line, method.name);
                     lineTypeMap.set(method.line, 'implementation');
+                }
+            }
+
+            // 为通过注释声明但 gopls 未检测到的接口添加装饰
+            for (const [structName, declaredInterfaces] of commentImplements.entries()) {
+                for (const ifaceName of declaredInterfaces) {
+                    // 检查该接口是否存在于当前文档
+                    const iface = interfaces.find(i => i.name === ifaceName);
+                    if (iface) {
+                        // 1. 接口定义行装饰
+                        if (!interfaceDecorations.some(d => d.line === iface.line)) {
+                            interfaceDecorations.push({
+                                line: iface.line,
+                                type: 'interface',
+                                name: iface.name
+                            });
+                            lineToMethodMap.set(iface.line, iface.name);
+                            lineTypeMap.set(iface.line, 'interface');
+                        }
+
+                        // 2. 接口方法装饰 - 仅当方法被该结构体实现时显示
+                        for (const method of iface.methods) {
+                            // 检查当前文档中的方法，看是否有属于该结构体且名称匹配的方法
+                            const isImplemented = allMethods.some(m =>
+                                (m.receiverType === structName || m.receiverType === `*${structName}`) &&
+                                m.name === method.name
+                            );
+
+                            if (isImplemented && !interfaceDecorations.some(d => d.line === method.line)) {
+                                interfaceDecorations.push({
+                                    line: method.line,
+                                    type: 'interface',
+                                    name: method.name
+                                });
+                                lineToMethodMap.set(method.line, method.name);
+                                lineTypeMap.set(method.line, 'interface');
+                            }
+                        }
+                    }
+
+                    // 3. 为结构体方法添加实现装饰 (如果是当前文档的方法)
+                    for (const method of allMethods) {
+                        if ((method.receiverType === structName || method.receiverType === `*${structName}`) &&
+                            iface && iface.methods.some(m => m.name === method.name)) {
+
+                            if (!implementationDecorations.some(d => d.line === method.line)) {
+                                implementationDecorations.push({
+                                    line: method.line,
+                                    type: 'implementation',
+                                    name: method.name
+                                });
+                                lineToMethodMap.set(method.line, method.name);
+                                lineTypeMap.set(method.line, 'implementation');
+                            }
+                        }
+                    }
                 }
             }
 
@@ -346,5 +462,144 @@ export class GoplsService implements IParserService {
         }
         this.checkPromise = null;
         console.log('[IJump] gopls 缓存已清除');
+    }
+
+    /**
+     * 获取注释声明的接口实现关系
+     * 返回 Map: 接口名 -> 实现该接口的结构体列表
+     */
+    async getCommentImplementations(document: vscode.TextDocument): Promise<Map<string, CommentImplementation[]>> {
+        const result = new Map<string, CommentImplementation[]>();
+
+        try {
+            const text = document.getText();
+            const symbols = await this.getDocumentSymbols(document.uri);
+
+            // 创建结构体名到行号的映射
+            const structLines = new Map<string, number>();
+            for (const symbol of symbols) {
+                if (symbol.kind === vscode.SymbolKind.Struct || symbol.kind === vscode.SymbolKind.Class) {
+                    structLines.set(symbol.name, symbol.selectionRange.start.line);
+                }
+            }
+
+            // 解析注释中的 ensure X implements Y 格式
+            const patterns = [
+                /\/\/\s*ensure\s+(\w+)\s+implements\s+([\w,\s]+)/gi,
+                /\/\*\s*ensure\s+(\w+)\s+implements\s+([\w,\s]+)\s*\*\//gi,
+                /\/\/\s*(\w+)\s+implements\s+([\w,\s]+)/gi,
+            ];
+
+            for (const pattern of patterns) {
+                let match;
+                while ((match = pattern.exec(text)) !== null) {
+                    const structName = match[1].trim();
+                    const interfacesPart = match[2];
+
+                    // 获取结构体的行号
+                    const structLine = structLines.get(structName);
+                    if (structLine === undefined) {
+                        continue;
+                    }
+
+                    // 解析接口列表
+                    const interfaces = interfacesPart
+                        .split(',')
+                        .map(s => s.trim())
+                        .filter(s => s.length > 0 && /^[A-Za-z_]\w*$/.test(s));
+
+                    for (const interfaceName of interfaces) {
+                        const impl: CommentImplementation = {
+                            interfaceName: interfaceName,
+                            structName: structName,
+                            structLine: structLine,
+                            structUri: document.uri
+                        };
+
+                        if (!result.has(interfaceName)) {
+                            result.set(interfaceName, []);
+                        }
+                        result.get(interfaceName)!.push(impl);
+                    }
+                }
+            }
+
+            return result;
+        } catch (error) {
+            console.error('[IJump] gopls 获取注释实现关系失败:', error);
+            return result;
+        }
+    }
+
+    /**
+     * 获取指定行号的实现跳转目标（支持注释声明）
+     */
+    async getImplementationTargets(document: vscode.TextDocument, line: number): Promise<JumpTarget[]> {
+        const targets: JumpTarget[] = [];
+
+        try {
+            const decs = await this.getAllDecorations(document);
+            if (!decs) {
+                return targets;
+            }
+
+            const name = decs.lineToMethodMap.get(line);
+            if (!name) {
+                return targets;
+            }
+
+            // 获取当前文档的所有解析信息
+            const symbols = await this.getDocumentSymbols(document.uri);
+            const interfaces = this.extractInterfaces(symbols, document.uri);
+            const { structs, methods } = this.extractStructsAndMethods(symbols, document.uri);
+            const commentImpls = await this.getCommentImplementations(document);
+
+            // 合并所有方法以便查找
+            const allMethods = [...methods];
+            for (const s of structs) {
+                allMethods.push(...s.methods);
+            }
+
+            // 1. 如果点击的是接口定义行
+            if (commentImpls.has(name)) {
+                const impls = commentImpls.get(name)!;
+                for (const impl of impls) {
+                    targets.push({
+                        uri: impl.structUri,
+                        line: impl.structLine,
+                        name: impl.structName
+                    });
+                }
+                return targets;
+            }
+
+            // 2. 如果点击的是接口方法行
+            const iface = interfaces.find(i => i.methods.some(m => m.line === line && m.name === name));
+            if (iface) {
+                const impls = commentImpls.get(iface.name);
+                if (impls) {
+                    for (const impl of impls) {
+                        // 在当前文档中查找属于该结构体的同名方法
+                        const methodImpl = allMethods.find(m =>
+                            (m.receiverType === impl.structName || m.receiverType === `*${impl.structName}`) &&
+                            m.name === name
+                        );
+
+                        if (methodImpl) {
+                            targets.push({
+                                uri: methodImpl.uri,
+                                line: methodImpl.line,
+                                name: `${impl.structName}.${methodImpl.name}`
+                            });
+                        }
+                    }
+                }
+            }
+
+            return targets;
+        } catch (error) {
+            console.error('[IJump] gopls 获取跳转目标失败:', error);
+            return targets;
+        }
     }
 }

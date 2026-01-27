@@ -530,6 +530,46 @@ class IJumpExtension {
 				return;
 			}
 
+			// 首先检查是否有注释声明的实现跳转目标（支持接口和方法）
+			const implementationTargets = await this.parserManager.getImplementationTargets(document, line);
+
+			if (implementationTargets && implementationTargets.length > 0) {
+				console.log(`找到 ${implementationTargets.length} 个注释声明的实现跳转目标`);
+
+				if (implementationTargets.length === 1) {
+					// 只有一个目标，直接跳转
+					const target = implementationTargets[0];
+					const targetDoc = await vscode.workspace.openTextDocument(target.uri);
+					const targetEditor = await vscode.window.showTextDocument(targetDoc);
+					const targetPosition = new vscode.Position(target.line, 0);
+					targetEditor.selection = new vscode.Selection(targetPosition, targetPosition);
+					targetEditor.revealRange(new vscode.Range(targetPosition, targetPosition), vscode.TextEditorRevealType.InCenter);
+					return;
+				} else {
+					// 多个目标，显示快速选择器
+					const items = implementationTargets.map(target => ({
+						label: target.name,
+						description: `行 ${target.line + 1}`,
+						detail: target.uri.fsPath,
+						target: target
+					}));
+
+					const selected = await vscode.window.showQuickPick(items, {
+						placeHolder: '选择要跳转的实现'
+					});
+
+					if (selected) {
+						const targetDoc = await vscode.workspace.openTextDocument(selected.target.uri);
+						const targetEditor = await vscode.window.showTextDocument(targetDoc);
+						const targetPosition = new vscode.Position(selected.target.line, 0);
+						targetEditor.selection = new vscode.Selection(targetPosition, targetPosition);
+						targetEditor.revealRange(new vscode.Range(targetPosition, targetPosition), vscode.TextEditorRevealType.InCenter);
+					}
+					return;
+				}
+			}
+
+			// 没有注释声明的实现，使用 VS Code 内置命令
 			// 获取行文本找到方法名的位置
 			const lineText = document.lineAt(line).text;
 			const methodNameIndex = lineText.indexOf(methodName);

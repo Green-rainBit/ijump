@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { IParserService, DecorationInfo } from './parserInterface';
+import { IParserService, DecorationInfo, CommentImplementation, JumpTarget } from './parserInterface';
 import { GoAstParser } from './goAstParser';
 import { GoplsService } from './goplsService';
 
@@ -233,5 +233,22 @@ export class ParserManager implements IParserService {
     async switchMode(mode: ParserMode): Promise<void> {
         const config = vscode.workspace.getConfiguration('ijump');
         await config.update('parserMode', mode, vscode.ConfigurationTarget.Global);
+    }
+
+    /**
+     * 获取注释声明的接口实现关系
+     * 返回 Map: 接口名 -> 实现该接口的结构体列表
+     */
+    async getCommentImplementations(document: vscode.TextDocument): Promise<Map<string, CommentImplementation[]>> {
+        const service = await this.getCurrentService();
+        return service.getCommentImplementations(document);
+    }
+
+    /**
+     * 获取指定行号的实现跳转目标（支持注释声明）
+     */
+    async getImplementationTargets(document: vscode.TextDocument, line: number): Promise<JumpTarget[]> {
+        const service = await this.getCurrentService();
+        return service.getImplementationTargets(document, line);
     }
 }

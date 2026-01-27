@@ -41,6 +41,25 @@ export interface DecorationInfo {
 }
 
 /**
+ * 注释声明的接口实现关系
+ */
+export interface CommentImplementation {
+    interfaceName: string;
+    structName: string;
+    structLine: number;
+    structUri: vscode.Uri;
+}
+
+/**
+ * 跳转目标信息
+ */
+export interface JumpTarget {
+    uri: vscode.Uri;
+    line: number;
+    name: string;
+}
+
+/**
  * 解析结果
  */
 export interface ParseResult {
@@ -81,6 +100,17 @@ export interface IParserService {
     }>;
 
     /**
+     * 获取注释声明的接口实现关系
+     * 返回 Map: 接口名 -> 实现该接口的结构体列表
+     */
+    getCommentImplementations(document: vscode.TextDocument): Promise<Map<string, CommentImplementation[]>>;
+
+    /**
+     * 获取指定行号的实现跳转目标（支持注释声明）
+     */
+    getImplementationTargets(document: vscode.TextDocument, line: number): Promise<JumpTarget[]>;
+
+    /**
      * 清除缓存
      */
     clearCache(filePath?: string): void;
@@ -90,3 +120,4 @@ export interface IParserService {
      */
     getServiceName(): string;
 }
+

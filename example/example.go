@@ -12,7 +12,7 @@ type Writer interface {
 	Close() error
 }
 
-// FileReader 实现了 Reader 接口
+// ensure FileReader implements Reader
 type FileReader struct {
 	path string
 }

@@ -8,6 +8,8 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 )
 
 // 接口方法信息
@@ -38,10 +40,11 @@ type FieldInfo struct {
 
 // 结构体定义信息
 type StructInfo struct {
-	Name     string      `json:"name"`
-	Line     int         `json:"line"`
-	FilePath string      `json:"filePath"`
-	Fields   []FieldInfo `json:"fields"`
+	Name                 string      `json:"name"`
+	Line                 int         `json:"line"`
+	FilePath             string      `json:"filePath"`
+	Fields               []FieldInfo `json:"fields"`
+	ImplementsInterfaces []string    `json:"implementsInterfaces,omitempty"` // 通过注释声明实现的接口
 }
 
 // 方法实现信息
@@ -88,6 +91,86 @@ func getTypeNameFromExpr(expr ast.Expr) (name string, isPointer bool) {
 		}
 	}
 	return "", false
+}
+
+// 从注释中解析 "ensure X implements Y" 格式的接口声明
+// 支持格式:
+//   - // ensure StructName implements InterfaceName
+//   - // ensure StructName implements InterfaceName, InterfaceName2
+//   - /* ensure StructName implements InterfaceName */
+func parseImplementsComment(comment string, structName string) []string {
+	var interfaces []string
+
+	// 支持多种格式的正则匹配
+	// 格式1: ensure StructName implements Interface1, Interface2
+	// 格式2: StructName implements Interface1
+	patterns := []string{
+		// 完整格式: ensure X implements Y
+		`(?i)ensure\s+` + structName + `\s+implements\s+([A-Za-z_][A-Za-z0-9_,\s]*)`,
+		// 简化格式: X implements Y
+		`(?i)` + structName + `\s+implements\s+([A-Za-z_][A-Za-z0-9_,\s]*)`,
+		// var _ Interface = (*Struct)(nil) 风格
+		`var\s+_\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\(\*` + structName + `\)\(nil\)`,
+	}
+
+	for _, pattern := range patterns {
+		re := regexp.MustCompile(pattern)
+		matches := re.FindStringSubmatch(comment)
+		if len(matches) >= 2 {
+			// 解析接口列表（可能用逗号分隔）
+			interfaceList := strings.Split(matches[1], ",")
+			for _, iface := range interfaceList {
+				iface = strings.TrimSpace(iface)
+				if iface != "" && isValidIdentifier(iface) {
+					interfaces = append(interfaces, iface)
+				}
+			}
+			break
+		}
+	}
+
+	return interfaces
+}
+
+// 检查是否是有效的Go标识符
+func isValidIdentifier(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i, r := range s {
+		if i == 0 {
+			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_') {
+				return false
+			}
+		} else {
+			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// 从注释组中提取接口实现声明
+func extractImplementsFromComments(commentGroup *ast.CommentGroup, structName string) []string {
+	if commentGroup == nil {
+		return nil
+	}
+
+	var interfaces []string
+	for _, comment := range commentGroup.List {
+		text := comment.Text
+		// 去掉注释符号
+		text = strings.TrimPrefix(text, "//")
+		text = strings.TrimPrefix(text, "/*")
+		text = strings.TrimSuffix(text, "*/")
+		text = strings.TrimSpace(text)
+
+		found := parseImplementsComment(text, structName)
+		interfaces = append(interfaces, found...)
+	}
+
+	return interfaces
 }
 
 // 递归解析目录下的Go文件
@@ -186,6 +269,19 @@ func parseDirectory(dirPath string) (ParseResult, error) {
 										Line:     getLineFromPos(fset, typeSpec.Pos()),
 										FilePath: path,
 										Fields:   []FieldInfo{},
+									}
+
+									// 从注释中提取接口实现声明
+									// 优先检查 typeSpec 的注释，然后检查 decl 的注释
+									var implementsInterfaces []string
+									if typeSpec.Doc != nil {
+										implementsInterfaces = extractImplementsFromComments(typeSpec.Doc, typeSpec.Name.Name)
+									}
+									if len(implementsInterfaces) == 0 && decl.Doc != nil {
+										implementsInterfaces = extractImplementsFromComments(decl.Doc, typeSpec.Name.Name)
+									}
+									if len(implementsInterfaces) > 0 {
+										structInfo.ImplementsInterfaces = implementsInterfaces
 									}
 
 									// 解析结构体字段

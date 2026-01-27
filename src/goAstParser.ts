@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as cp from 'child_process';
 import { promisify } from 'util';
-import { IParserService, DecorationInfo } from './parserInterface';
+import { IParserService, DecorationInfo, CommentImplementation, JumpTarget } from './parserInterface';
 
 const execFile = promisify(cp.execFile);
 
@@ -53,6 +53,7 @@ export interface StructInfo {
     line: number;
     filePath: string;
     fields: FieldInfo[];
+    implementsInterfaces?: string[]; // 通过注释声明实现的接口
 }
 
 // 方法实现信息
@@ -511,10 +512,23 @@ export class GoAstParser implements IParserService {
 
     /**
      * 查找接口实现的注释标记
+     * 从 Go parser 解析的结构体数据中提取 implementsInterfaces 字段
      */
     private findInterfaceImplementationMarkers(result: GoAstResult, structsMap: Map<string, Map<string, any>>): void {
-        // 在真实环境中需要解析注释
-        // 此处使用简化实现，可以根据需要扩展
+        for (const packagePath in result.packages) {
+            const pkg = result.packages[packagePath];
+
+            for (const struct of pkg.structs) {
+                // 检查结构体是否有通过注释声明的接口实现
+                if (struct.implementsInterfaces && struct.implementsInterfaces.length > 0) {
+                    const structInfo = structsMap.get(struct.name);
+                    if (structInfo) {
+                        structInfo.set('implementsInterfaces', struct.implementsInterfaces);
+                        console.log(`[IJump] 发现注释声明: ${struct.name} implements ${struct.implementsInterfaces.join(', ')}`);
+                    }
+                }
+            }
+        }
     }
 
     /**
@@ -536,19 +550,31 @@ export class GoAstParser implements IParserService {
 
     /**
      * 检查哪些结构体实现了接口
+     * 返回一个对象包含:
+     * - methodMatchedInterfaces: 通过方法匹配识别的接口
+     * - commentOnlyInterfaces: 仅通过注释声明的接口（没有方法匹配）
+     * - allImplementedInterfaces: 所有被实现的接口
      */
     public checkInterfaceImplementations(
         interfaceMethodsMap: Map<string, string[]>,
         structMethodsMap: Map<string, Map<string, any>>,
         structsMap?: Map<string, Map<string, any>>
-    ): Set<string> {
-        const implementedInterfaces = new Set<string>();
+    ): {
+        methodMatchedInterfaces: Set<string>;
+        commentOnlyInterfaces: Set<string>;
+        allImplementedInterfaces: Set<string>;
+        interfaceImplementations: Map<string, Set<string>>;
+    } {
+        const methodMatchedInterfaces = new Set<string>();
+        const commentDeclaredInterfaces = new Set<string>();
         // 记录实现每个接口的结构体
         const interfaceImplementations = new Map<string, Set<string>>();
 
         // 创建一个帮助函数，用于添加接口实现关系
-        const addImplementation = (interfaceName: string, structName: string) => {
-            implementedInterfaces.add(interfaceName);
+        const addImplementation = (interfaceName: string, structName: string, isMethodMatched: boolean) => {
+            if (isMethodMatched) {
+                methodMatchedInterfaces.add(interfaceName);
+            }
 
             if (!interfaceImplementations.has(interfaceName)) {
                 interfaceImplementations.set(interfaceName, new Set<string>());
@@ -563,7 +589,8 @@ export class GoAstParser implements IParserService {
                     const implementsInterfaces = structInfo.get('implementsInterfaces');
                     for (const interfaceName of implementsInterfaces) {
                         if (interfaceMethodsMap.has(interfaceName)) {
-                            addImplementation(interfaceName, structName);
+                            commentDeclaredInterfaces.add(interfaceName);
+                            addImplementation(interfaceName, structName, false);
                         }
                     }
                 }
@@ -572,17 +599,15 @@ export class GoAstParser implements IParserService {
 
         // 检查方法名和数量匹配 - 分析每个结构体是否实现了接口的所有方法
         for (const [interfaceName, interfaceMethods] of interfaceMethodsMap.entries()) {
-            // 跳过空接口或已确认实现的接口
-            if (interfaceMethods.length === 0 || implementedInterfaces.has(interfaceName)) {
+            // 跳过空接口
+            if (interfaceMethods.length === 0) {
                 continue;
             }
 
             // 对每个结构体检查方法匹配度
             for (const [structName, structMethods] of structMethodsMap.entries()) {
-                // 跳过特殊标记和已知实现该接口的结构体
-                if (structName.startsWith('__') && structName.endsWith('__') ||
-                    (interfaceImplementations.has(interfaceName) &&
-                        interfaceImplementations.get(interfaceName)?.has(structName))) {
+                // 跳过特殊标记
+                if (structName.startsWith('__') && structName.endsWith('__')) {
                     continue;
                 }
 
@@ -610,7 +635,7 @@ export class GoAstParser implements IParserService {
                 const perfectMatch = implementationRate === 1.0;
 
                 if (perfectMatch) {
-                    addImplementation(interfaceName, structName);
+                    addImplementation(interfaceName, structName, true);
                 }
             }
         }
@@ -653,7 +678,7 @@ export class GoAstParser implements IParserService {
                                 if (!interfaceImplementations.has(interfaceName) ||
                                     !interfaceImplementations.get(interfaceName)?.has(structName)) {
 
-                                    addImplementation(interfaceName, structName);
+                                    addImplementation(interfaceName, structName, true);
                                     hasNewImplementation = true;
                                 }
                             }
@@ -665,7 +690,7 @@ export class GoAstParser implements IParserService {
 
         // 检查指针接收器的方法 - 特别处理可能存在于其他文件中的方法
         for (const [interfaceName, interfaceMethods] of interfaceMethodsMap.entries()) {
-            if (interfaceMethods.length === 0 || implementedInterfaces.has(interfaceName)) {
+            if (interfaceMethods.length === 0 || methodMatchedInterfaces.has(interfaceName)) {
                 continue;
             }
 
@@ -717,13 +742,32 @@ export class GoAstParser implements IParserService {
                     const perfectMatch = implementationRate === 1.0;
 
                     if (perfectMatch) {
-                        addImplementation(interfaceName, structName);
+                        addImplementation(interfaceName, structName, true);
                     }
                 }
             }
         }
 
-        return implementedInterfaces;
+        // 计算仅通过注释声明的接口（排除已通过方法匹配的）
+        const commentOnlyInterfaces = new Set<string>();
+        for (const interfaceName of commentDeclaredInterfaces) {
+            if (!methodMatchedInterfaces.has(interfaceName)) {
+                commentOnlyInterfaces.add(interfaceName);
+            }
+        }
+
+        // 合并所有实现的接口
+        const allImplementedInterfaces = new Set<string>([
+            ...methodMatchedInterfaces,
+            ...commentOnlyInterfaces
+        ]);
+
+        return {
+            methodMatchedInterfaces,
+            commentOnlyInterfaces,
+            allImplementedInterfaces,
+            interfaceImplementations
+        };
     }
 
     // ==================== IParserService 接口实现 ====================
@@ -802,8 +846,11 @@ export class GoAstParser implements IParserService {
 
             // 处理接口装饰
             for (const [interfaceName, methodLocations] of interfaceLocationsMap.entries()) {
-                if (implementedInterfaces.has(interfaceName)) {
-                    // 接口定义
+                const isMethodMatched = implementedInterfaces.methodMatchedInterfaces.has(interfaceName);
+                const isCommentOnly = implementedInterfaces.commentOnlyInterfaces.has(interfaceName);
+
+                if (isMethodMatched || isCommentOnly) {
+                    // 接口定义 - 始终显示
                     const interfaceDefLocation = methodLocations.get('__interface_def__');
                     if (interfaceDefLocation && interfaceDefLocation.uri.toString() === docKey) {
                         interfaceDecorations.push({
@@ -815,9 +862,30 @@ export class GoAstParser implements IParserService {
                         lineTypeMap.set(interfaceDefLocation.line, 'interface');
                     }
 
-                    // 接口方法
+                    // 接口方法装饰
                     for (const [methodName, methodLocation] of methodLocations.entries()) {
-                        if (methodName !== '__interface_def__' && methodLocation.uri.toString() === docKey) {
+                        if (methodName === '__interface_def__' || methodLocation.uri.toString() !== docKey) {
+                            continue;
+                        }
+
+                        let shouldShowIcon = isMethodMatched;
+
+                        // 如果是仅注释声明，检查是否有结构体实现了此方法
+                        if (!shouldShowIcon && isCommentOnly) {
+                            const implementers = implementedInterfaces.interfaceImplementations.get(interfaceName);
+                            if (implementers) {
+                                for (const structName of implementers) {
+                                    // 检查该结构体是否具有此方法
+                                    const structMethods = structMethodsMap.get(structName);
+                                    if (structMethods && structMethods.has(methodName)) {
+                                        shouldShowIcon = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        if (shouldShowIcon) {
                             interfaceDecorations.push({
                                 line: methodLocation.line,
                                 type: 'interface',
@@ -825,23 +893,33 @@ export class GoAstParser implements IParserService {
                             });
                             lineToMethodMap.set(methodLocation.line, methodName);
                             lineTypeMap.set(methodLocation.line, 'interface');
-                        }
-                    }
 
-                    // 为接口方法创建实现映射
-                    const methods = interfaceMethodsMap.get(interfaceName) || [];
-                    for (const method of methods) {
-                        if (!interfaceImplementingMethods.has(method)) {
-                            interfaceImplementingMethods.set(method, new Set<string>());
+                            // 预初始化映射
+                            if (!interfaceImplementingMethods.has(methodName)) {
+                                interfaceImplementingMethods.set(methodName, new Set<string>());
+                            }
                         }
                     }
                 }
             }
 
-            // 查找实现接口的结构体
+            // 查找并建立接口与实现之间的映射关系
             for (const [interfaceName, methods] of interfaceMethodsMap.entries()) {
-                if (implementedInterfaces.has(interfaceName)) {
-                    for (const [structName, structMethods] of structMethodsMap.entries()) {
+                const isMethodMatched = implementedInterfaces.methodMatchedInterfaces.has(interfaceName);
+                const isCommentOnly = implementedInterfaces.commentOnlyInterfaces.has(interfaceName);
+
+                if (isMethodMatched || isCommentOnly) {
+                    const implementers = implementedInterfaces.interfaceImplementations.get(interfaceName);
+                    if (!implementers) {
+                        continue;
+                    }
+
+                    for (const structName of implementers) {
+                        const structMethods = structMethodsMap.get(structName);
+                        if (!structMethods) {
+                            continue;
+                        }
+
                         const structMethodNames = new Set<string>();
                         for (const methodName of structMethods.keys()) {
                             if (!methodName.startsWith('__')) {
@@ -849,22 +927,41 @@ export class GoAstParser implements IParserService {
                             }
                         }
 
-                        let implementedAllMethods = true;
-                        for (const method of methods) {
-                            if (!structMethodNames.has(method)) {
-                                implementedAllMethods = false;
-                                break;
+                        // 判断该结构体是否已经实现了接口（或者是显式声明实现的）
+                        let structImplementsInterface = false;
+                        if (isMethodMatched) {
+                            // 检查是否全匹配
+                            let allMatch = true;
+                            for (const method of methods) {
+                                if (!structMethodNames.has(method)) {
+                                    allMatch = false;
+                                    break;
+                                }
+                            }
+                            if (allMatch) {
+                                structImplementsInterface = true;
                             }
                         }
 
-                        if (implementedAllMethods) {
+                        // 如果是注释声明，且该结构体确实是声明中的一个
+                        if (!structImplementsInterface && isCommentOnly && implementers.has(structName)) {
+                            structImplementsInterface = true;
+                        }
+
+                        if (structImplementsInterface) {
                             if (!structImplementedInterfaces.has(structName)) {
                                 structImplementedInterfaces.set(structName, new Set<string>());
                             }
                             structImplementedInterfaces.get(structName)!.add(interfaceName);
 
+                            // 为该结构体实现的方法建立映射
                             for (const method of methods) {
-                                interfaceImplementingMethods.get(method)?.add(structName);
+                                if (structMethodNames.has(method)) {
+                                    if (!interfaceImplementingMethods.has(method)) {
+                                        interfaceImplementingMethods.set(method, new Set<string>());
+                                    }
+                                    interfaceImplementingMethods.get(method)?.add(structName);
+                                }
                             }
                         }
                     }
@@ -912,6 +1009,143 @@ export class GoAstParser implements IParserService {
         } catch (error) {
             console.error('[IJump] GoAstParser 获取装饰信息失败:', error);
             return { interfaceDecorations, implementationDecorations, lineToMethodMap, lineTypeMap };
+        }
+    }
+
+    /**
+     * 获取注释声明的接口实现关系
+     * 返回 Map: 接口名 -> 实现该接口的结构体列表
+     */
+    async getCommentImplementations(document: vscode.TextDocument): Promise<Map<string, CommentImplementation[]>> {
+        const result = new Map<string, CommentImplementation[]>();
+
+        try {
+            const parseResult = await this.parseGoFile(document.uri.fsPath);
+
+            if (!parseResult || !parseResult.packages) {
+                return result;
+            }
+
+            // 遍历所有包中的结构体
+            for (const packagePath in parseResult.packages) {
+                const pkg = parseResult.packages[packagePath];
+
+                for (const struct of pkg.structs) {
+                    // 检查结构体是否有通过注释声明的接口实现
+                    if (struct.implementsInterfaces && struct.implementsInterfaces.length > 0) {
+                        for (const interfaceName of struct.implementsInterfaces) {
+                            const impl: CommentImplementation = {
+                                interfaceName: interfaceName,
+                                structName: struct.name,
+                                structLine: struct.line,
+                                structUri: vscode.Uri.file(struct.filePath)
+                            };
+
+                            if (!result.has(interfaceName)) {
+                                result.set(interfaceName, []);
+                            }
+                            result.get(interfaceName)!.push(impl);
+                        }
+                    }
+                }
+            }
+
+            return result;
+        } catch (error) {
+            console.error('[IJump] GoAstParser 获取注释实现关系失败:', error);
+            return result;
+        }
+    }
+
+    /**
+     * 获取指定行号的实现跳转目标（支持注释声明）
+     */
+    async getImplementationTargets(document: vscode.TextDocument, line: number): Promise<JumpTarget[]> {
+        const targets: JumpTarget[] = [];
+        const docKey = document.uri.toString();
+
+        try {
+            const decs = await this.getAllDecorations(document);
+            if (!decs) {
+                return targets;
+            }
+
+            const name = decs.lineToMethodMap.get(line);
+            if (!name) {
+                return targets;
+            }
+
+            // 获取所有注释声明的实现
+            const commentImpls = await this.getCommentImplementations(document);
+
+            // 1. 如果点击的是接口定义行（name 是接口名）
+            if (commentImpls.has(name)) {
+                const impls = commentImpls.get(name)!;
+                for (const impl of impls) {
+                    targets.push({
+                        uri: impl.structUri,
+                        line: impl.structLine,
+                        name: impl.structName
+                    });
+                }
+                return targets;
+            }
+
+            // 2. 如果点击的是接口方法行（name 是方法名）
+            // 我们需要找到这个方法属于哪个接口，并且该接口是否有注释声明的实现
+            const parseResult = await this.parseGoFile(document.uri.fsPath);
+            if (!parseResult || !parseResult.packages) {
+                return targets;
+            }
+
+            let parentInterfaceName: string | undefined;
+
+            // 查找包含该行的方法属于哪个接口
+            for (const packagePath in parseResult.packages) {
+                const pkg = parseResult.packages[packagePath];
+                for (const iface of pkg.interfaces) {
+                    if (iface.filePath === document.uri.fsPath) {
+                        for (const method of iface.methods) {
+                            if (method.line === line && method.name === name) {
+                                parentInterfaceName = iface.name;
+                                break;
+                            }
+                        }
+                    }
+                    if (parentInterfaceName) {
+                        break;
+                    }
+                }
+                if (parentInterfaceName) {
+                    break;
+                }
+            }
+
+            if (parentInterfaceName && commentImpls.has(parentInterfaceName)) {
+                const impls = commentImpls.get(parentInterfaceName)!;
+                for (const impl of impls) {
+                    // 在目标结构体中查找同名方法
+                    // 遍历所有包的方法实现
+                    for (const pkgPath in parseResult.packages) {
+                        const pkg = parseResult.packages[pkgPath];
+                        for (const method of pkg.methods) {
+                            if ((method.receiverType === impl.structName || method.receiverType === `*${impl.structName}`) &&
+                                method.methodName === name) {
+                                targets.push({
+                                    uri: vscode.Uri.file(method.filePath),
+                                    line: method.line,
+                                    name: `${impl.structName}.${method.methodName}`
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            return targets;
+        } catch (error) {
+            console.error('[IJump] GoAstParser 获取跳转目标失败:', error);
+            return targets;
         }
     }
 } 
