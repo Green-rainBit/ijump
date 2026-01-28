@@ -475,8 +475,15 @@ export class GoplsService implements IParserService {
             const text = document.getText();
             const symbols = await this.getDocumentSymbols(document.uri);
 
-            // 创建结构体名到行号的映射
+            // 创建结构体名和接口名到行号及 URI 的映射
             const structLines = new Map<string, number>();
+            const interfaceInfos = new Map<string, { line: number, uri: vscode.Uri }>();
+
+            const extractedInterfaces = this.extractInterfaces(symbols, document.uri);
+            for (const iface of extractedInterfaces) {
+                interfaceInfos.set(iface.name, { line: iface.line, uri: iface.uri });
+            }
+
             for (const symbol of symbols) {
                 if (symbol.kind === vscode.SymbolKind.Struct || symbol.kind === vscode.SymbolKind.Class) {
                     structLines.set(symbol.name, symbol.selectionRange.start.line);
@@ -509,11 +516,15 @@ export class GoplsService implements IParserService {
                         .filter(s => s.length > 0 && /^[A-Za-z_]\w*$/.test(s));
 
                     for (const interfaceName of interfaces) {
+                        const ifaceInfo = interfaceInfos.get(interfaceName);
+
                         const impl: CommentImplementation = {
                             interfaceName: interfaceName,
                             structName: structName,
                             structLine: structLine,
-                            structUri: document.uri
+                            structUri: document.uri,
+                            interfaceLine: ifaceInfo?.line ?? 0,
+                            interfaceUri: ifaceInfo?.uri ?? document.uri
                         };
 
                         if (!result.has(interfaceName)) {
@@ -599,6 +610,105 @@ export class GoplsService implements IParserService {
             return targets;
         } catch (error) {
             console.error('[IJump] gopls 获取跳转目标失败:', error);
+            return targets;
+        }
+    }
+
+    /**
+     * 获取指定行号的接口跳转目标（支持从实现跳转回接口）
+     */
+    async getInterfaceTargets(document: vscode.TextDocument, line: number): Promise<JumpTarget[]> {
+        const targets: JumpTarget[] = [];
+
+        try {
+            const decs = await this.getAllDecorations(document);
+            if (!decs) {
+                return targets;
+            }
+
+            const name = decs.lineToMethodMap.get(line);
+            if (!name) {
+                return targets;
+            }
+
+            const symbols = await this.getDocumentSymbols(document.uri);
+            const interfaces = this.extractInterfaces(symbols, document.uri);
+            const { structs, methods } = this.extractStructsAndMethods(symbols, document.uri);
+            const commentImpls = await this.getCommentImplementations(document);
+
+            const allMethods = [...methods];
+            for (const s of structs) {
+                allMethods.push(...s.methods);
+            }
+
+            // 1. 判断该行是否是结构体定义行
+            const struct = structs.find(s => s.line === line && s.name === name);
+            if (struct) {
+                // 查找该结构体实现的接口
+                for (const [ifaceName, impls] of commentImpls.entries()) {
+                    if (impls.some(impl => impl.structName === struct.name)) {
+                        // 寻找对应接口的定义 (可能在同一个文件或缓存中)
+                        // 注意：gopls 模式下 interfaces 只包含当前文件的
+                        const iface = interfaces.find(i => i.name === ifaceName);
+                        if (iface) {
+                            targets.push({
+                                uri: iface.uri,
+                                line: iface.line,
+                                name: iface.name
+                            });
+                        } else {
+                            // 如果当前文档没找到，可以尝试通过 commentImpls 中的信息（如果有位置信息）
+                            const impl = impls.find(i => i.structName === struct.name);
+                            if (impl) {
+                                // 假设接口也在当前项目可见范围内，尝试直接定位
+                                targets.push({
+                                    uri: impl.interfaceUri,
+                                    line: impl.interfaceLine,
+                                    name: ifaceName
+                                });
+                            }
+                        }
+                    }
+                }
+                return targets;
+            }
+
+            // 2. 判断该行是否是结构体方法定义行
+            const method = allMethods.find(m => m.line === line && m.name === name);
+            if (method && method.receiverType) {
+                const receiverName = method.receiverType.startsWith('*') ? method.receiverType.substring(1) : method.receiverType;
+
+                for (const [ifaceName, impls] of commentImpls.entries()) {
+                    if (impls.some(impl => impl.structName === receiverName)) {
+                        // 查找接口是否包含该方法
+                        const iface = interfaces.find(i => i.name === ifaceName);
+                        if (iface) {
+                            const ifaceMethod = iface.methods.find(m => m.name === name);
+                            if (ifaceMethod) {
+                                targets.push({
+                                    uri: ifaceMethod.uri,
+                                    line: ifaceMethod.line,
+                                    name: `${ifaceName}.${ifaceMethod.name}`
+                                });
+                            }
+                        } else {
+                            // 回退逻辑：查找该接口的实现信息以获取接口 URI
+                            const impl = impls.find(i => i.structName === receiverName);
+                            if (impl) {
+                                targets.push({
+                                    uri: impl.interfaceUri,
+                                    line: impl.interfaceLine, // 只能跳转到接口定义
+                                    name: ifaceName
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            return targets;
+        } catch (error) {
+            console.error('[IJump] gopls 获取接口跳转目标失败:', error);
             return targets;
         }
     }

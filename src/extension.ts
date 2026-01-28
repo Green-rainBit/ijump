@@ -488,6 +488,46 @@ class IJumpExtension {
 				return;
 			}
 
+			// 检查是否有注释声明的接口跳转目标
+			const interfaceTargets = await this.parserManager.getInterfaceTargets(document, line);
+
+			if (interfaceTargets && interfaceTargets.length > 0) {
+				console.log(`找到 ${interfaceTargets.length} 个注释声明的接口跳转目标`);
+
+				if (interfaceTargets.length === 1) {
+					// 只有一个目标，直接跳转
+					const target = interfaceTargets[0];
+					const targetDoc = await vscode.workspace.openTextDocument(target.uri);
+					const targetEditor = await vscode.window.showTextDocument(targetDoc);
+					const targetPosition = new vscode.Position(target.line, 0);
+					targetEditor.selection = new vscode.Selection(targetPosition, targetPosition);
+					targetEditor.revealRange(new vscode.Range(targetPosition, targetPosition), vscode.TextEditorRevealType.InCenter);
+					return;
+				} else {
+					// 多个目标，显示快速选择器
+					const items = interfaceTargets.map(target => ({
+						label: target.name,
+						description: `行 ${target.line + 1}`,
+						detail: target.uri.fsPath,
+						target: target
+					}));
+
+					const selected = await vscode.window.showQuickPick(items, {
+						placeHolder: '选择要跳转的接口'
+					});
+
+					if (selected) {
+						const targetDoc = await vscode.workspace.openTextDocument(selected.target.uri);
+						const targetEditor = await vscode.window.showTextDocument(targetDoc);
+						const targetPosition = new vscode.Position(selected.target.line, 0);
+						targetEditor.selection = new vscode.Selection(targetPosition, targetPosition);
+						targetEditor.revealRange(new vscode.Range(targetPosition, targetPosition), vscode.TextEditorRevealType.InCenter);
+					}
+					return;
+				}
+			}
+
+			// 没有注释声明的接口，使用 VS Code 内置命令
 			// 获取行文本找到方法名的位置
 			const lineText = document.lineAt(line).text;
 			const methodNameIndex = lineText.indexOf(methodName);
@@ -503,7 +543,8 @@ class IJumpExtension {
 			editor.selection = new vscode.Selection(position, position);
 			editor.revealRange(new vscode.Range(position, position));
 
-			// 使用VS Code内置命令
+			// 使用VS Code内置命令 (对于实现方法，通常跳转的是 Type Definition)
+			// 注意：Go 扩展中，实现到接口的跳转往往是通过 Go to Type Definition 或 Go to Implementation 的相反方向
 			await vscode.commands.executeCommand('editor.action.goToImplementation');
 		} catch (error) {
 			console.error('跳转失败:', error);

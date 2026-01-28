@@ -1034,11 +1034,27 @@ export class GoAstParser implements IParserService {
                     // 检查结构体是否有通过注释声明的接口实现
                     if (struct.implementsInterfaces && struct.implementsInterfaces.length > 0) {
                         for (const interfaceName of struct.implementsInterfaces) {
+                            // 查找接口定义以获取其位置
+                            let interfaceLine = 0;
+                            let interfaceUri = document.uri;
+
+                            for (const pPath in parseResult.packages) {
+                                const p = parseResult.packages[pPath];
+                                const iface = p.interfaces.find(i => i.name === interfaceName);
+                                if (iface) {
+                                    interfaceLine = iface.line;
+                                    interfaceUri = vscode.Uri.file(iface.filePath);
+                                    break;
+                                }
+                            }
+
                             const impl: CommentImplementation = {
                                 interfaceName: interfaceName,
                                 structName: struct.name,
                                 structLine: struct.line,
-                                structUri: vscode.Uri.file(struct.filePath)
+                                structUri: vscode.Uri.file(struct.filePath),
+                                interfaceLine: interfaceLine,
+                                interfaceUri: interfaceUri
                             };
 
                             if (!result.has(interfaceName)) {
@@ -1144,7 +1160,115 @@ export class GoAstParser implements IParserService {
 
             return targets;
         } catch (error) {
-            console.error('[IJump] GoAstParser 获取跳转目标失败:', error);
+            console.error('[IJump] GoAstParser 获取实现跳转目标失败:', error);
+            return targets;
+        }
+    }
+
+    /**
+     * 获取指定行号的接口跳转目标（支持从实现跳转回接口）
+     */
+    async getInterfaceTargets(document: vscode.TextDocument, line: number): Promise<JumpTarget[]> {
+        const targets: JumpTarget[] = [];
+
+        try {
+            const decs = await this.getAllDecorations(document);
+            if (!decs) {
+                return targets;
+            }
+
+            const name = decs.lineToMethodMap.get(line);
+            if (!name) {
+                return targets;
+            }
+
+            // 获取 Go 文件的解析结果
+            const parseResult = await this.parseGoFile(document.uri.fsPath);
+            if (!parseResult || !parseResult.packages) {
+                return targets;
+            }
+
+            // 1. 判断该行是否是结构体定义行
+            let targetStructName: string | undefined;
+            for (const pkgPath in parseResult.packages) {
+                const pkg = parseResult.packages[pkgPath];
+                const struct = pkg.structs.find(s => s.filePath === document.uri.fsPath && s.line === line && s.name === name);
+                if (struct) {
+                    targetStructName = struct.name;
+                    break;
+                }
+            }
+
+            if (targetStructName) {
+                // 如果是结构体定义行，寻找它声明实现的接口
+                for (const pkgPath in parseResult.packages) {
+                    const pkg = parseResult.packages[pkgPath];
+                    for (const struct of pkg.structs) {
+                        if (struct.name === targetStructName && struct.implementsInterfaces) {
+                            for (const ifaceName of struct.implementsInterfaces) {
+                                // 在所有包中寻找该接口的定义
+                                for (const pPath in parseResult.packages) {
+                                    const p = parseResult.packages[pPath];
+                                    const iface = p.interfaces.find(i => i.name === ifaceName);
+                                    if (iface) {
+                                        targets.push({
+                                            uri: vscode.Uri.file(iface.filePath),
+                                            line: iface.line,
+                                            name: iface.name
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                return targets;
+            }
+
+            // 2. 判断该行是否是结构体方法定义行
+            let targetMethodName = name;
+            let receiverName: string | undefined;
+
+            for (const pkgPath in parseResult.packages) {
+                const pkg = parseResult.packages[pkgPath];
+                const method = pkg.methods.find(m => m.filePath === document.uri.fsPath && m.line === line && m.methodName === targetMethodName);
+                if (method) {
+                    // 去掉指针前缀 *
+                    receiverName = method.receiverType.startsWith('*') ? method.receiverType.substring(1) : method.receiverType;
+                    break;
+                }
+            }
+
+            if (receiverName) {
+                // 如果是结构体方法，查找该结构体实现的接口是否包含此方法
+                for (const pkgPath in parseResult.packages) {
+                    const pkg = parseResult.packages[pkgPath];
+                    const struct = pkg.structs.find(s => s.name === receiverName);
+                    if (struct && struct.implementsInterfaces) {
+                        for (const ifaceName of struct.implementsInterfaces) {
+                            // 查找接口定义及方法
+                            for (const pPath in parseResult.packages) {
+                                const p = parseResult.packages[pPath];
+                                const iface = p.interfaces.find(i => i.name === ifaceName);
+                                if (iface) {
+                                    const ifaceMethod = iface.methods.find(m => m.name === targetMethodName);
+                                    if (ifaceMethod) {
+                                        targets.push({
+                                            uri: vscode.Uri.file(ifaceMethod.filePath),
+                                            line: ifaceMethod.line,
+                                            name: `${iface.name}.${ifaceMethod.name}`
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            return targets;
+        } catch (error) {
+            console.error('[IJump] GoAstParser 获取接口跳转目标失败:', error);
             return targets;
         }
     }

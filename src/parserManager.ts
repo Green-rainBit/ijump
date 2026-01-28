@@ -251,4 +251,12 @@ export class ParserManager implements IParserService {
         const service = await this.getCurrentService();
         return service.getImplementationTargets(document, line);
     }
+
+    /**
+     * 获取指定行号的接口跳转目标（支持从实现跳转回接口）
+     */
+    async getInterfaceTargets(document: vscode.TextDocument, line: number): Promise<JumpTarget[]> {
+        const service = await this.getCurrentService();
+        return service.getInterfaceTargets(document, line);
+    }
 }

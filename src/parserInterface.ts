@@ -48,6 +48,8 @@ export interface CommentImplementation {
     structName: string;
     structLine: number;
     structUri: vscode.Uri;
+    interfaceLine: number;
+    interfaceUri: vscode.Uri;
 }
 
 /**
@@ -109,6 +111,11 @@ export interface IParserService {
      * 获取指定行号的实现跳转目标（支持注释声明）
      */
     getImplementationTargets(document: vscode.TextDocument, line: number): Promise<JumpTarget[]>;
+
+    /**
+     * 获取指定行号的接口跳转目标（支持从实现跳转回接口）
+     */
+    getInterfaceTargets(document: vscode.TextDocument, line: number): Promise<JumpTarget[]>;
 
     /**
      * 清除缓存
