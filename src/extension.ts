@@ -442,6 +442,12 @@ class IJumpExtension {
 		const docDecoratedLines = this.cacheManager.getDecoratedLines(docKey);
 		const lineTypes = this.cacheManager.getLineTypeMap(docKey);
 
+		// 检查配置是否开启悬浮窗跳转
+		const config = vscode.workspace.getConfiguration('ijump');
+		if (!config.get<boolean>('enableHover', true)) {
+			return null;
+		}
+
 		// 如果行没有被装饰，不显示悬停信息
 		if (!methodMap || !methodMap.has(position.line) ||
 			!docDecoratedLines || !docDecoratedLines.has(position.line) ||
@@ -451,18 +457,21 @@ class IJumpExtension {
 
 		const methodName = methodMap.get(position.line)!;
 		const lineType = lineTypes.get(position.line)!;
-		const commandUri = `command:ijump.jumpToImplementation?${encodeURIComponent(JSON.stringify([document.uri, position.line]))}`;
+
 		const markdown = new vscode.MarkdownString();
 		markdown.isTrusted = true;
 
 		if (lineType === 'interface') {
 			// 接口或接口方法 - 显示跳转到实现
+			const commandUri = `command:ijump.jumpToImplementation?${encodeURIComponent(JSON.stringify([document.uri, position.line]))}`;
 			markdown.appendMarkdown(`**接口**: ${methodName}\n\n[➡️ 跳转到实现](${commandUri})`);
 		} else if (lineType === 'implementation') {
 			// 实现方法或结构体 - 显示跳转到接口定义
+			const commandUri = `command:ijump.jumpToInterface?${encodeURIComponent(JSON.stringify([document.uri, position.line]))}`;
 			markdown.appendMarkdown(`**实现**: ${methodName}\n\n[⬆️ 跳转到接口定义](${commandUri})`);
 		} else {
 			// 默认情况
+			const commandUri = `command:ijump.jumpToImplementation?${encodeURIComponent(JSON.stringify([document.uri, position.line]))}`;
 			markdown.appendMarkdown(`[➡️ 跳转到 ${methodName} 的实现](${commandUri})`);
 		}
 
@@ -696,12 +705,17 @@ class IJumpExtension {
 			const implementationDecorations: vscode.DecorationOptions[] = [];
 
 			// 处理接口装饰
+			const enableHover = config.get<boolean>('enableHover', true);
+
 			for (const info of interfaceInfos) {
 				const commandUri = vscode.Uri.parse(
 					`command:ijump.jumpToImplementation?${encodeURIComponent(JSON.stringify([document.uri, info.line]))}`
 				);
-				const hoverMessage = new vscode.MarkdownString(`**接口**: ${info.name}\n\n[$(symbol-interface) 跳转到实现](${commandUri})`);
-				hoverMessage.isTrusted = true;
+				let hoverMessage: vscode.MarkdownString | undefined;
+				if (enableHover) {
+					hoverMessage = new vscode.MarkdownString(`**接口**: ${info.name}\n\n[➡️ 跳转到实现](${commandUri})`);
+					hoverMessage.isTrusted = true;
+				}
 
 				// 计算范围 - 尝试定位到方法名末尾以支持 Inline 模式
 				let range = new vscode.Range(info.line, 0, info.line, 0);
@@ -727,8 +741,11 @@ class IJumpExtension {
 				const commandUri = vscode.Uri.parse(
 					`command:ijump.jumpToInterface?${encodeURIComponent(JSON.stringify([document.uri, info.line]))}`
 				);
-				const hoverMessage = new vscode.MarkdownString(`**实现**: ${info.name}\n\n[$(symbol-class) 跳转到接口定义](${commandUri})`);
-				hoverMessage.isTrusted = true;
+				let hoverMessage: vscode.MarkdownString | undefined;
+				if (enableHover) {
+					hoverMessage = new vscode.MarkdownString(`**实现**: ${info.name}\n\n[⬆️ 跳转到接口定义](${commandUri})`);
+					hoverMessage.isTrusted = true;
+				}
 
 				// 计算范围 - 尝试定位到方法名末尾以支持 Inline 模式
 				let range = new vscode.Range(info.line, 0, info.line, 0);

@@ -42,7 +42,7 @@
             "both"
           ],
           "enumDescriptions": [
-            "仅显示图标（位置由 iconPosition 决定，悬停显示跳转链接）",
+            "仅显示图标（位置由 iconPosition 决定，悬浮窗可配置是否显示跳转链接）",
             "仅显示 CodeLens（点击直接跳转）",
             "同时显示图标和 CodeLens"
           ],
@@ -61,6 +61,11 @@
           ],
           "default": "gutter",
           "description": "图标显示位置"
+        },
+        "ijump.enableHover": {
+          "type": "boolean",
+          "default": true,
+          "description": "是否在悬浮窗中显示跳转链接"
         }
       }
     },
