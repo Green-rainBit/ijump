@@ -121,12 +121,13 @@ export class GoplsService implements IParserService {
     /**
      * 从文档符号中提取接口信息
      */
-    private extractInterfaces(symbols: vscode.DocumentSymbol[], uri: vscode.Uri): InterfaceInfo[] {
-        const interfaces: InterfaceInfo[] = [];
+    private extractInterfaces(symbols: vscode.DocumentSymbol[], uri: vscode.Uri): (InterfaceInfo & { selectionRange: vscode.Range, methodRanges: Map<string, vscode.Range> })[] {
+        const interfaces: (InterfaceInfo & { selectionRange: vscode.Range, methodRanges: Map<string, vscode.Range> })[] = [];
 
         for (const symbol of symbols) {
             if (symbol.kind === vscode.SymbolKind.Interface) {
                 const methods: MethodInfo[] = [];
+                const methodRanges = new Map<string, vscode.Range>();
 
                 // 提取接口方法
                 if (symbol.children) {
@@ -138,6 +139,7 @@ export class GoplsService implements IParserService {
                                 line: child.selectionRange.start.line,
                                 uri: uri
                             });
+                            methodRanges.set(child.name, child.selectionRange);
                         }
                     }
                 }
@@ -146,7 +148,9 @@ export class GoplsService implements IParserService {
                     name: symbol.name,
                     line: symbol.selectionRange.start.line,
                     uri: uri,
-                    methods: methods
+                    methods: methods,
+                    selectionRange: symbol.selectionRange,
+                    methodRanges: methodRanges
                 });
             }
         }
@@ -159,10 +163,10 @@ export class GoplsService implements IParserService {
      */
     private extractStructsAndMethods(symbols: vscode.DocumentSymbol[], uri: vscode.Uri): {
         structs: StructInfo[];
-        methods: MethodInfo[];
+        methods: (MethodInfo & { selectionRange: vscode.Range })[];
     } {
         const structs: StructInfo[] = [];
-        const methods: MethodInfo[] = [];
+        const methods: (MethodInfo & { selectionRange: vscode.Range })[] = [];
 
         for (const symbol of symbols) {
             // 结构体
@@ -173,12 +177,15 @@ export class GoplsService implements IParserService {
                 if (symbol.children) {
                     for (const child of symbol.children) {
                         if (child.kind === vscode.SymbolKind.Method) {
-                            structMethods.push({
+                            const methodInfo: MethodInfo & { selectionRange: vscode.Range } = {
                                 name: child.name,
                                 line: child.selectionRange.start.line,
                                 uri: uri,
-                                receiverType: symbol.name
-                            });
+                                receiverType: symbol.name,
+                                selectionRange: child.selectionRange
+                            };
+                            structMethods.push(methodInfo);
+                            methods.push(methodInfo);
                         }
                     }
                 }
@@ -201,13 +208,15 @@ export class GoplsService implements IParserService {
                         line: symbol.selectionRange.start.line,
                         uri: uri,
                         receiverType: match[1],
-                        isPointer: symbol.name.includes('*')
+                        isPointer: symbol.name.includes('*'),
+                        selectionRange: symbol.selectionRange
                     });
                 } else {
                     methods.push({
                         name: symbol.name,
                         line: symbol.selectionRange.start.line,
-                        uri: uri
+                        uri: uri,
+                        selectionRange: symbol.selectionRange
                     });
                 }
             }
@@ -314,8 +323,14 @@ export class GoplsService implements IParserService {
 
             // 为每个接口检查是否有实现
             for (const iface of interfaces) {
-                const position = new vscode.Position(iface.line, 0);
+                // 使用 selectionRange 的中心位置，确保光标在符号名称上
+                const position = new vscode.Position(
+                    iface.selectionRange.start.line,
+                    Math.floor((iface.selectionRange.start.character + iface.selectionRange.end.character) / 2)
+                );
+                console.log(`[IJump] gopls: 检查接口 ${iface.name} 在位置 (${position.line}, ${position.character})`);
                 const implementations = await this.findImplementations(document.uri, position);
+                console.log(`[IJump] gopls: 接口 ${iface.name} 找到 ${implementations?.length || 0} 个实现`);
 
                 if (implementations && implementations.length > 0) {
                     // 接口有实现，添加装饰
@@ -341,10 +356,8 @@ export class GoplsService implements IParserService {
             }
 
             // 为每个方法检查是否实现了接口
-            const allMethods = [...methods];
-            for (const struct of structs) {
-                allMethods.push(...struct.methods);
-            }
+            // 注意：methods 已经包含了所有结构体方法（在 extractStructsAndMethods 中已添加）
+            const allMethods = methods;
 
             // 解析注释中的接口实现声明
             const commentImplements = this.parseImplementsComments(document);
@@ -360,7 +373,11 @@ export class GoplsService implements IParserService {
             }
 
             for (const method of allMethods) {
-                const position = new vscode.Position(method.line, 0);
+                // 使用 selectionRange 的中心位置
+                const position = new vscode.Position(
+                    method.selectionRange.start.line,
+                    Math.floor((method.selectionRange.start.character + method.selectionRange.end.character) / 2)
+                );
                 const typeDefinitions = await this.findTypeDefinition(document.uri, position);
 
                 // 仅当 gopls 能检测到类型定义时，才添加实现装饰
@@ -566,10 +583,8 @@ export class GoplsService implements IParserService {
             const commentImpls = await this.getCommentImplementations(document);
 
             // 合并所有方法以便查找
-            const allMethods = [...methods];
-            for (const s of structs) {
-                allMethods.push(...s.methods);
-            }
+            // 注意：methods 已经包含了所有方法
+            const allMethods = methods;
 
             // 1. 如果点击的是接口定义行
             if (commentImpls.has(name)) {
@@ -636,10 +651,8 @@ export class GoplsService implements IParserService {
             const { structs, methods } = this.extractStructsAndMethods(symbols, document.uri);
             const commentImpls = await this.getCommentImplementations(document);
 
-            const allMethods = [...methods];
-            for (const s of structs) {
-                allMethods.push(...s.methods);
-            }
+            // 注意：methods 已经包含了所有方法
+            const allMethods = methods;
 
             // 1. 判断该行是否是结构体定义行
             const struct = structs.find(s => s.line === line && s.name === name);
